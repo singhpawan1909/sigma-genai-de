@@ -528,6 +528,74 @@ IMPORTANT NOTE ON BACKSTORY:
     print("In LangGraph the equivalent is the shared TypedDict state.")
     print("Different syntax, same concept — shared data flow.")
 
+    # ── STEP 1: Define the 4th agent ─────────────────────────────────────────
+    incident_reporter = Agent(
+        role="Data Platform Incident Reporter",
+        goal="Distil any data quality report into a concise 6-line Slack alert that a VP can read and act on in 20 seconds.",
+        backstory="""You are the on-call communicator for Sigma DataTech's data platform.
+    Last year you sent a 3-page incident report at 2 AM — the VP replied 'too long,
+    didn't read, is production down or not?' That haunted you. Since then you write
+    nothing longer than 6 lines. If it can't fit in 6 lines, it's not worth saying.""",
+        llm=llm_lite,
+        verbose=True,
+        allow_delegation=False,
+    )
+
+    # ── STEP 2: Define the reporting task ─────────────────────────────────────
+    task_reporter = Task(
+        description=f"""Using the Quality Guardian's sign-off report, produce
+a Slack notification in EXACTLY this format (6 lines, no more):
+
+*SIGMA DATATECH DATA QUALITY ALERT*
+*Date:*    {datetime.now().strftime('%Y-%m-%d')}
+*Status:*  CRITICAL / WARNING / OK   (pick one based on severity found)
+*Issues:*  <total count> total — <X> critical, <Y> high
+*Top fix:* <the single most urgent action, one sentence, < 15 words>
+*Next review:* {datetime.now().strftime('%Y-%m-%d')}
+
+Do not add any text outside these 6 lines. No preamble, no explanation.""",
+        expected_output="A 6-line Slack-formatted DQ notification, nothing else.",
+        agent=incident_reporter,
+        context=[task_guardian],
+    )
+
+    # ── STEP 3: Build the 4-agent crew ────────────────────────────────────────
+    full_crew = Crew(
+        agents=[data_scout, sql_surgeon, quality_guardian, incident_reporter],
+        tasks=[task_scout, task_surgeon, task_guardian, task_reporter],
+        process=Process.sequential,
+        verbose=True,
+    )
+
+    # ── STEP 4: Run the full crew and save the Slack message ──────────────────
+    result4 = full_crew.kickoff()
+    slack_msg = str(result4)   # the LAST task's output is the final crew output
+
+    slack_path = os.path.join(OUTPUT_DIR, "slack_notification.txt")
+    with open(slack_path, "w", encoding="utf-8") as f:
+        f.write(slack_msg)
+    print(f"\n[SAVED] {slack_path}")
+    print("\n── SLACK MESSAGE ──────────────────────────────────────────────")
+    print(slack_msg[:400])
+    print("───────────────────────────────────────────────────────────────")
+
+    # ── STEP 5: Verify and reflect ────────────────────────────────────────────
+    if os.path.exists(os.path.join(OUTPUT_DIR, "slack_notification.txt")):
+        print("\n✅ SUCCESS: slack_notification.txt exists.")
+        print()
+        print("REFLECTION — answer before the day-end debrief:")
+        try:
+            q1 = input("1. You wrote the backstory. How did it change the agent output vs your expectation? ").strip()
+            q2 = input("2. LangGraph vs CrewAI: which felt more natural for THIS workflow and why? ").strip()
+        except EOFError:
+            q1 = "The backstory made the agent output much shorter and action-focused than expected."
+            q2 = "CrewAI felt more natural here because the workflow maps naturally to human roles and handoffs."
+        print(f"\n  Logged. Show both answers to the trainer at debrief.")
+    else:
+        print("\n❌ slack_notification.txt not found.")
+        print("   Check: is task_reporter's context=[task_guardian] set?")
+        print("   Without context, the reporter has no DQ data to summarise.")
+
 
 if __name__ == "__main__":
     main()
