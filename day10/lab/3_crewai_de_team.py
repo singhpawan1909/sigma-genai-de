@@ -46,17 +46,112 @@ from datetime import datetime
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-try:
-    from crewai import Agent, Task, Crew, Process, LLM
-except ImportError:
-    print("[ERROR] Run: pip install crewai")
-    sys.exit(1)
-
+# ── Lightweight CrewAI shim (crewai 0.11.x is broken on Python 3.14 due to
+#    pkg_resources removal; this shim re-implements the same Agent/Task/Crew
+#    /Process/LLM API surface using litellm + boto3 directly) ──────────────────
 try:
     import boto3
 except ImportError:
     print("[ERROR] Run: pip install boto3")
     sys.exit(1)
+
+try:
+    import litellm
+    litellm.suppress_debug_info = True
+except ImportError:
+    print("[ERROR] Run: pip install litellm")
+    sys.exit(1)
+
+
+class LLM:
+    """Mirrors CrewAI's LLM wrapper — routes calls through litellm."""
+    def __init__(self, model: str, aws_region_name: str = "us-east-1"):
+        self.model = model
+        os.environ.setdefault("AWS_DEFAULT_REGION", aws_region_name)
+
+    def call(self, messages: list) -> str:
+        resp = litellm.completion(model=self.model, messages=messages)
+        return resp.choices[0].message.content
+
+
+class Agent:
+    """Mirrors CrewAI's Agent — holds role/goal/backstory and an LLM."""
+    def __init__(self, role: str, goal: str, backstory: str, llm: LLM,
+                 verbose: bool = True, allow_delegation: bool = False):
+        self.role = role
+        self.goal = goal
+        self.backstory = backstory
+        self.llm = llm
+        self.verbose = verbose
+        self.allow_delegation = allow_delegation
+
+    def run(self, task_description: str, context: str = "") -> str:
+        system_msg = (
+            f"You are a {self.role}.\n"
+            f"Goal: {self.goal}\n"
+            f"Backstory: {self.backstory}\n"
+            "Be precise, structured, and professional."
+        )
+        user_content = task_description
+        if context:
+            user_content = f"=== CONTEXT FROM PREVIOUS AGENTS ===\n{context}\n\n=== YOUR TASK ===\n{task_description}"
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user",   "content": user_content},
+        ]
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print(f"[Agent: {self.role}] working...")
+            print(f"{'='*60}")
+        result = self.llm.call(messages)
+        if self.verbose:
+            print(result[:600] + ("..." if len(result) > 600 else ""))
+        return result
+
+
+class Task:
+    """Mirrors CrewAI's Task — holds description, expected_output, agent, context."""
+    def __init__(self, description: str, expected_output: str,
+                 agent: Agent, context: list = None):
+        self.description = description
+        self.expected_output = expected_output
+        self.agent = agent
+        self.context: list = context or []
+        self.output: str = ""
+
+
+class _ProcessType:
+    sequential = "sequential"
+    hierarchical = "hierarchical"
+
+Process = _ProcessType()
+
+
+class Crew:
+    """Mirrors CrewAI's Crew — runs Tasks sequentially, wiring context."""
+    def __init__(self, agents: list, tasks: list,
+                 process: str = "sequential", verbose: bool = True):
+        self.agents = agents
+        self.tasks = tasks
+        self.process = process
+        self.verbose = verbose
+
+    def kickoff(self) -> str:
+        print(f"\n🚀 Crew kickoff — {len(self.tasks)} tasks, process={self.process}")
+        for task in self.tasks:
+            ctx_text = ""
+            if task.context:
+                ctx_parts = []
+                for prev in task.context:
+                    if prev.output:
+                        ctx_parts.append(
+                            f"[{prev.agent.role}]:\n{prev.output}"
+                        )
+                ctx_text = "\n\n".join(ctx_parts)
+            task.output = task.agent.run(task.description, context=ctx_text)
+        # Return the last task's output as the crew result
+        return self.tasks[-1].output
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_PATH    = os.path.join(os.path.dirname(__file__), "sigma_platform.duckdb")
@@ -66,7 +161,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # AWS region for LiteLLM → Bedrock (uses boto3 default credential chain)
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
-# ── LLM setup (CrewAI → LiteLLM → Bedrock) ───────────────────────────────────
+# ── LLM setup (CrewAI shim → LiteLLM → Bedrock) ──────────────────────────────
 llm_pro  = LLM(model="bedrock/amazon.nova-pro-v1:0",  aws_region_name="us-east-1")
 llm_lite = LLM(model="bedrock/amazon.nova-lite-v1:0", aws_region_name="us-east-1")
 
